@@ -1,0 +1,94 @@
+name: build-x86-64-immortalwrt-25.12.x
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装依赖
+        run: sudo apt update && sudo apt install -y build-essential cmake flex git libssl-dev libelf-dev
+
+      - name: 克隆 ImmortalWrt 25.12 源码
+        run: |
+          git clone --depth=1 https://github.com/immortalwrt/immortalwrt -b openwrt-25.12 openwrt
+          cd openwrt
+
+      - name: 添加 dae & ddns-go 源
+        working-directory: openwrt
+        run: |
+          echo "src-git dae https://github.com/daeuniverse/dae-feed.git;main" >> feeds.conf.default
+          echo "src-git ddnsgo https://github.com/sirpdboy/luci-app-ddns-go.git" >> feeds.conf.default
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: 写入内核配置（BPF全开）
+        working-directory: openwrt
+        run: |
+          cat > .config << EOF
+CONFIG_TARGET_x86=y
+CONFIG_TARGET_x86_64=y
+CONFIG_TARGET_x86_64_DEVICE_generic=y
+CONFIG_GRUB_EFI=y
+CONFIG_TARGET_ROOTFS_PARTSIZE=1024
+
+# BPF 完整开启
+CONFIG_BPF=y
+CONFIG_BPF_SYSCALL=y
+CONFIG_BPF_JIT=y
+CONFIG_CGROUPS=y
+CONFIG_KPROBES=y
+CONFIG_NET_INGRESS=y
+CONFIG_NET_EGRESS=y
+CONFIG_NET_SCH_INGRESS=m
+CONFIG_NET_CLS_BPF=m
+CONFIG_NET_CLS_ACT=y
+CONFIG_BPF_STREAM_PARSER=y
+CONFIG_DEBUG_INFO=y
+# CONFIG_DEBUG_INFO_REDUCED is not set
+CONFIG_DEBUG_INFO_BTF=y
+CONFIG_KPROBE_EVENTS=y
+CONFIG_BPF_EVENTS=y
+
+# I226 网卡
+CONFIG_IGC=y
+CONFIG_E1000E=y
+
+# 软件包
+CONFIG_PACKAGE_dae=y
+CONFIG_PACKAGE_luci-app-dae=y
+CONFIG_PACKAGE_luci-i18n-dae-zh-cn=y
+CONFIG_PACKAGE_ddns-go=y
+CONFIG_PACKAGE_luci-app-ddns-go=y
+CONFIG_PACKAGE_luci-i18n-ddns-go-zh-cn=y
+CONFIG_PACKAGE_bpftool=y
+CONFIG_PACKAGE_tc=y
+CONFIG_PACKAGE_luci-app-turboacc=y
+EOF
+
+      - name: 固化网口 + IP
+        working-directory: openwrt
+        run: |
+          mkdir -p files/etc/uci-defaults/
+          cat > files/etc/uci-defaults/99-config << EOF
+uci set network.wan.device='eth0'
+uci set network.wan6.device='eth0'
+uci set network.lan.ifname='eth1 eth2 eth3'
+uci set network.lan.ipaddr='192.168.100.1'
+uci commit network
+EOF
+
+      - name: 编译
+        working-directory: openwrt
+        run: |
+          make defconfig
+          make download -j8
+          make -j$(nproc) || make -j1 V=s
+
+      - name: 上传固件
+        uses: actions/upload-artifact@v4
+        with:
+          name: immortalwrt-x86-64-efi
+          path: openwrt/bin/targets/x86/64/*combined-efi.img.gz

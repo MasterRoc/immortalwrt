@@ -1,0 +1,142 @@
+name: ImmortalWrt-25.12-N150-4xI226-DAE-DDNS
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+env:
+  REPO_URL: https://github.com/immortalwrt/immortalwrt
+  REPO_BRANCH: openwrt-25.12  # 改为25.12分支
+  FEED_CONF: feeds.conf.default
+  TARGET: x86
+  SUBTARGET: 64
+  DEVICE: generic
+  SSH_ACTIONS: false
+  UPLOAD_BIN: true
+  UPLOAD_FIRMWARE: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt update -y
+          sudo apt install -y ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
+          bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib \
+          git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev \
+          libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw6-dev libpython3-dev libreadline-dev \
+          libssl-dev libtool libyaml-dev libz-dev lrzsz mkisofs msmtp ninja-build p7zip p7zip-full patch pkgconf \
+          python3 python3-pyelftools python3-setuptools qemu-utils rsync scons squashfs-tools subversion swig texinfo \
+          uglifyjs unzip vim wget xmlto xxd zlib1g-dev
+
+      - name: Clone ImmortalWrt 25.12 source
+        run: |
+          git clone --depth 1 $REPO_URL -b $REPO_BRANCH openwrt
+          cd openwrt
+
+      - name: Add custom feeds (dae & ddns-go)
+        working-directory: openwrt
+        run: |
+          echo "src-git dae https://github.com/daeuniverse/dae-feed.git;main" >> feeds.conf.default
+          echo "src-git ddnsgo https://github.com/sirpdboy/luci-app-ddns-go.git" >> feeds.conf.default
+
+      - name: Update and install feeds
+        working-directory: openwrt
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Generate full .config (25.12 + N150 + I226 + eBPF + DAE + DDNS)
+        working-directory: openwrt
+        run: |
+          cat > .config << EOF
+  CONFIG_TARGET_x86=y
+  CONFIG_TARGET_x86_64=y
+  CONFIG_TARGET_x86_64_DEVICE_generic=y
+  CONFIG_TARGET_KERNEL_PARTSIZE=64
+  CONFIG_TARGET_ROOTFS_PARTSIZE=1024
+  CONFIG_GRUB_TIMEOUT=1
+  CONFIG_VMDK_IMAGES=n
+  CONFIG_QCOW2_IMAGES=n
+  CONFIG_GRUB_EFI=y
+
+  # eBPF / BTF full config (your requirement)
+  CONFIG_BPF=y
+  CONFIG_BPF_SYSCALL=y
+  CONFIG_BPF_JIT=y
+  CONFIG_CGROUPS=y
+  CONFIG_KPROBES=y
+  CONFIG_NET_INGRESS=y
+  CONFIG_NET_EGRESS=y
+  CONFIG_NET_SCH_INGRESS=m
+  CONFIG_NET_CLS_BPF=m
+  CONFIG_NET_CLS_ACT=y
+  CONFIG_BPF_STREAM_PARSER=y
+  CONFIG_DEBUG_INFO=y
+  # CONFIG_DEBUG_INFO_REDUCED is not set
+  CONFIG_DEBUG_INFO_BTF=y
+  CONFIG_KPROBE_EVENTS=y
+  CONFIG_BPF_EVENTS=y
+
+  # Intel I226 NIC driver
+  CONFIG_IGC=y
+  CONFIG_E1000E=y
+  CONFIG_NET_VENDOR_INTEL=y
+
+  # Network optimization
+  CONFIG_DEFAULT_TCP_CONG_BBR=y
+  CONFIG_TCP_CONG_BBR=y
+  CONFIG_NETFILTER_FULLCONENAT=y
+  CONFIG_PACKET_FLOW_OFFLOAD=y
+  CONFIG_NET_SCH_CAKE=y
+  CONFIG_NET_SCH_FQ_CODEL=y
+
+  # Required packages: dae + ddns-go
+  CONFIG_PACKAGE_dae=y
+  CONFIG_PACKAGE_luci-app-dae=y
+  CONFIG_PACKAGE_luci-i18n-dae-zh-cn=y
+  CONFIG_PACKAGE_ddns-go=y
+  CONFIG_PACKAGE_luci-app-ddns-go=y
+  CONFIG_PACKAGE_luci-i18n-ddns-go-zh-cn=y
+
+  # System & tools
+  CONFIG_PACKAGE_bpftool=y
+  CONFIG_PACKAGE_tc=y
+  CONFIG_PACKAGE_curl=y
+  CONFIG_PACKAGE_wget-ssl=y
+  CONFIG_PACKAGE_jq=y
+  CONFIG_PACKAGE_luci-app-turboacc=y
+  CONFIG_PACKAGE_luci-app-cpu-frequency=y
+  EOF
+
+      - name: Make defconfig & download
+        working-directory: openwrt
+        run: |
+          make defconfig
+          make download -j8
+
+      - name: Build firmware
+        working-directory: openwrt
+        run: |
+          make -j$(nproc) || make -j1 V=s
+
+      - name: Collect firmware
+        working-directory: openwrt
+        run: |
+          mkdir -p firmware
+          cp -f bin/targets/x86/64/*combined*efi.img.gz firmware/
+          cp -f bin/targets/x86/64/config-* firmware/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ImmortalWrt-25.12-N150-4xI226
+          path: openwrt/firmware/
